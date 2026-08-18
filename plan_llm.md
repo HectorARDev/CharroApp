@@ -1,5 +1,10 @@
 # CharroApp — Scoring System: Implementation Plan
 
+> Este documento es el plan operativo detallado, para consumo de agentes/LLM (o para
+> ejecutar sin ambigüedad): sub-fases, archivos exactos, SQL literal, criterios de
+> aceptación. La versión para lectura humana (decisiones y su porqué, sin el detalle de
+> ejecución) es `plan.md`. Al editar uno, sincronizar el otro.
+
 ## PROJECT
 - **Name**: CharroApp
 - **Domain**: Real-time sports scoring for charrería (Mexican rodeo)
@@ -22,6 +27,7 @@ UI framework       react                          18 o 19           Component mo
 Mobile wrapper     @capacitor/core                última mayor      iOS/Android native
 Mobile wrapper     @capacitor/cli                 última mayor      CLI build tool
 Mobile storage     @capacitor/preferences         última mayor      Key-value config
+Mobile network     @capacitor/network             última mayor      Detección de conectividad confiable en nativo (navigator.onLine no es confiable en WebView iOS/Android — ver Fase 0.5.2)
 Styling            tailwindcss                    v4                Utility CSS
 UI components      shadcn/ui                      latest            Accessible components
 State              zustand                        v5                Global state
@@ -84,6 +90,8 @@ fecha       date NOT NULL
 lugar       text
 estado      text CHECK (estado IN ('borrador','activo','finalizado')) DEFAULT 'borrador'
 created_at  timestamptz DEFAULT now()
+-- constraint: solo un torneo activo a la vez (evita ambigüedad en RLS pública, SelectJuez, /display)
+create unique index one_active_torneo on torneos (estado) where estado = 'activo';
 
 -- equipos
 id          uuid PRIMARY KEY DEFAULT gen_random_uuid()
@@ -124,6 +132,7 @@ synced_at   timestamptz           -- NULL = not synced to server yet
 -- RLS: juez can only INSERT/UPDATE WHERE juez_id = auth.uid()
 -- RLS: admin can SELECT/UPDATE all
 -- RLS: lectura pública (sin auth) en torneos/participaciones/calificaciones del torneo activo — requerido por /display
+-- RLS: lectura pública (sin auth) en jueces del torneo activo con rol='juez' — requerido por SelectJuez.tsx (nunca expone cuentas admin)
 ```
 
 ---
@@ -204,7 +213,9 @@ paso_de_la_muerte       individual  0–10    0.5   Yes     2     Time + executi
 ```
 CharroApp/
 ├── src/
-│   ├── routes.tsx                 # HashRouter — ver Fase 0.2
+│   ├── routes/
+│   │   ├── index.tsx               # HashRouter — ver Fase 0.2
+│   │   └── NotFound.tsx
 │   ├── layouts/
 │   │   └── AppLayout.tsx
 │   ├── features/
@@ -212,6 +223,7 @@ CharroApp/
 │   │   │   ├── SelectJuez.tsx     # paso 1: elegir juez del torneo activo
 │   │   │   ├── LoginJuez.tsx      # paso 2: PIN pad
 │   │   │   ├── LoginAdmin.tsx     # email+pass
+│   │   │   ├── ProtectedRoute.tsx # pass-through en 0.2, lógica real en 0.4.4
 │   │   │   └── useAuth.ts
 │   │   ├── torneos/
 │   │   │   ├── TorneoList.tsx
@@ -254,6 +266,9 @@ CharroApp/
 │   └── functions/
 │       └── create-juez/
 │           └── index.ts           # crea auth.users + fila en jueces (Fase 1.1)
+├── .github/
+│   └── workflows/
+│       └── ci.yml                 # lint + test + build en cada push/PR (Fase 0.6)
 ├── capacitor.config.ts
 ├── vite.config.ts
 ├── .env.example
@@ -329,6 +344,23 @@ npx supabase gen types typescript    # regenerate DB types → src/lib/database.
 
 ## VERIFICATION CHECKLIST
 
+### Fase 0 (Fundación)
+```
+[ ] npm install && npm run dev levanta la app sin pasos manuales fuera de .env.example
+[ ] npm run lint, npm run test, npm run build pasan
+[ ] CI bloquea un push con lint/test roto a propósito (0.6)
+[ ] Admin de prueba (seed) puede loguearse con email+password
+[ ] Juez de prueba (seed) puede loguearse vía selección de nombre + PIN
+[ ] Sesión persiste tras cerrar/reabrir la app (sin pedir credenciales de nuevo)
+[ ] Con access token vencido y sin red, la app sigue permitiendo operar localmente (no bloquea por sesión)
+[ ] RLS: un juez no puede leer calificaciones de otro juez (probado manualmente)
+[ ] RLS: un anónimo puede leer /display del torneo activo pero no escribir nada
+[ ] Insertar un segundo torneo con estado='activo' falla (índice único de torneo activo)
+[ ] La app corre visualmente correcta en al menos un simulador nativo (iOS o Android)
+[ ] @capacitor/network reporta el estado de conexión correctamente en el simulador/dispositivo
+[ ] Ningún archivo de credenciales (.env.local) está commiteado
+```
+
 ### Fase 1 (MVP — solo cala_de_caballo)
 ```
 [ ] Offline: disable network → score cala_de_caballo → Dexie has record with synced=0
@@ -372,8 +404,26 @@ y evitar descubrir errores de diseño a medio camino.
 
 **Objetivo global**: cualquiera clona el repo, corre `npm install && npm run dev`, puede
 loguearse como admin o como juez (contra Supabase real), la sesión persiste entre
-reinicios, y la app corre al menos una vez en un simulador nativo. Cero lógica de
-calificación todavía.
+reinicios, la app corre al menos una vez en un simulador nativo, y CI corre lint+test+build
+en cada push. Cero lógica de calificación todavía.
+
+**Cobertura por área** (sigue siendo un solo codebase — no son 3 proyectos separados; ver
+`## ALTERNATIVAS CONSIDERADAS` si en algún momento se reconsidera):
+
+| Área | Sub-fases que la cubren en Fase 0 | Qué queda para Fase 1+ |
+|---|---|---|
+| Backend (Supabase) | 0.3.1–0.3.4 (proyecto, schema, RLS, tooling+seed) | Edge Function `create-juez` (1.1), schema de terna (2.4) |
+| App de calificación (juez) | 0.4.1 + 0.4.3 (login juez + modelo de sesión offline), 0.5.1 (Dexie), 0.5.2 (Capacitor + `@capacitor/network`) | Suertes (Fase 1/2), sync engine (1.2–1.3) |
+| Dashboard admin (incluye `/display` — ambos son "web", sin Capacitor) | 0.4.2 + 0.4.4 (login admin + rutas protegidas) | CRUD de torneos (1.1), `AdminDashboard.tsx`/`TablPublico.tsx` (1.4) |
+| Compartido por las 3 | 0.1 (scaffolding), 0.2 (routing+layout), 0.6 (CI) | — |
+
+**Dependencias reales** (la numeración 0.1→0.6 es agrupación temática, no obliga secuencia
+estricta salvo donde se indica): 0.1 es el único prerrequisito universal. A partir de ahí,
+**0.2, 0.3.1, 0.5.1 y 0.5.2 no dependen entre sí** y pueden hacerse en cualquier orden o en
+paralelo. **0.6 (CI) solo depende de 0.1** — conviene activarlo apenas terminen los scripts
+de lint/test/build, no esperar hasta el final, para que proteja el resto de Fase 0 mientras
+se construye. Las únicas cadenas estrictas son: `0.3.1 → 0.3.2 → 0.3.3 → 0.3.4` (cada una
+depende del schema/RLS anterior) y `0.4 depende de 0.3.3 (RLS) + 0.2 (ProtectedRoute existe)`.
 
 **0.1 — Scaffolding (sin backend)**
 - `npm create vite@latest . -- --template react-ts` — el directorio ya tiene `plan.md`/`plan_llm.md`/`.git`; mover ambos `.md` a `docs/` antes de scaffolding (o usar `--force`) para evitar que el CLI rechace un directorio no vacío
@@ -395,13 +445,24 @@ calificación todavía.
   igual en web y nativo sin tocar nada.
 - Rutas: `/login`, `/admin/*` (layout con nested routes), `/calificar/:participacionId`, `/display/:torneoId`
 - `ProtectedRoute.tsx`: se crea aquí como wrapper "pass-through" (deja pasar a cualquiera,
-  todavía no hay `useAuth()`). La lógica real de bloqueo por rol se conecta en **0.4**, no
+  todavía no hay `useAuth()`). La lógica real de bloqueo por rol se conecta en **0.4.4**, no
   aquí — evita ambigüedad sobre en qué sub-fase vive la protección de rutas.
+- Ruta catch-all `*` → `NotFound.tsx` + error boundary básico en `AppLayout.tsx` — evita pantalla en blanco silenciosa ante una ruta o error inesperado
+- **Code-splitting por área**: `/admin/*` y `/display/:torneoId` se cargan con `React.lazy()`
+  (chunks separados de `/calificar/:id`) — así el bundle que se empaqueta en Capacitor para
+  el juez no descarga ni ejecuta el JS del dashboard admin, aunque comparten el mismo
+  codebase/repo. Da buena parte del beneficio de "separar" sin la complejidad de un monorepo.
 - Placeholders de texto por ruta; `AppLayout.tsx` con header/nav mínimos
-- Archivos: `src/routes.tsx`, `src/layouts/AppLayout.tsx`, `src/features/auth/ProtectedRoute.tsx`
-- **DoD**: navegar manualmente entre las 4 rutas funciona en `npm run dev`.
+- Archivos: `src/routes/index.tsx`, `src/routes/NotFound.tsx`, `src/layouts/AppLayout.tsx`, `src/features/auth/ProtectedRoute.tsx`
+- **DoD**: navegar manualmente entre las 4 rutas funciona en `npm run dev`; una ruta inexistente muestra `NotFound`, no pantalla en blanco.
 
 **0.3 — Supabase: proyecto, schema, RLS**
+
+Se divide en 4 checkpoints propios porque mezclaba niveles de riesgo muy distintos —
+en particular, RLS necesita su propio gate de verificación antes de seguir, no compartir
+DoD con "crear el proyecto".
+
+**0.3.1 — Proyecto + entorno**
 - **Decisión de hosting**: free tier de Supabase desde el día 1 para Fase 0–2 (desarrollo/MVP)
   — sus límites duros (500MB DB, 5GB bandwidth/mes, 200 conexiones Realtime concurrentes,
   50k MAU) están muy por encima de lo que esta app necesitará. El riesgo real del free tier
@@ -413,7 +474,17 @@ calificación todavía.
   tier, ver arriba) desde el día 1 — **no** se monta stack local vía `supabase start`
   (Docker). Simplifica el setup (sin dependencia de Docker Desktop) y es consistente con ya
   tener un proyecto real desde Fase 0. Migraciones se aplican con `npx supabase db push`.
-- Crear proyecto Supabase (dev); `supabase/migrations/001_init.sql` con las 6 tablas (schema de arriba, sin columna `pin`)
+- Crear proyecto Supabase (dev); `.env.local` + `.env.example`, confirmar `.gitignore` cubre `.env.local` ANTES del primer commit
+- Archivos: `.env.example`
+- **DoD**: proyecto creado; `.env.local`/`.env.example` existen y `.gitignore` cubre `.env.local` (el cliente `supabase.ts` todavía no existe — eso se verifica hasta 0.3.4, no aquí).
+
+**0.3.2 — Schema**
+- `supabase/migrations/001_init.sql` con las 6 tablas (schema de arriba, sin columna `pin`), incluyendo el **índice único parcial que garantiza un solo torneo activo a la vez** (ver `## DATABASE SCHEMA`) — sin esto, dos torneos con `estado='activo'` simultáneos dejan `/display` y el login de jueces en un estado indeterminado
+- `npx supabase db push`
+- Archivos: `supabase/migrations/001_init.sql`
+- **DoD**: la migración aplica sin errores y las 6 tablas existen; probar el índice único con un insert manual por SQL (dos `insert into torneos (...) values (..., 'activo')`, el segundo debe fallar) — esta prueba NO depende del seed (que llega hasta 0.3.4).
+
+**0.3.3 — RLS (gate de seguridad — checkpoint obligatorio antes de 0.4)**
 - `supabase/migrations/002_rls.sql`: policy `juez` (solo sus propias filas en
   `calificaciones`), policy `admin` (todo), **policy de lectura pública** para
   `torneos`/`participaciones`/`calificaciones` del torneo activo (requisito de `/display`).
@@ -434,29 +505,43 @@ calificación todavía.
         where p.id = calificaciones.participacion_id and t.estado = 'activo'
       )
     );
+
+  create policy "public read jueces of active torneo" on jueces
+    for select to anon using (
+      rol = 'juez'
+      and exists (select 1 from torneos t where t.id = jueces.torneo_id and t.estado = 'activo')
+    );
   ```
-- `npx supabase gen types typescript` → `src/lib/database.types.ts`
-- `src/lib/supabase.ts` (`createClient<Database>()`), `.env.local` + `.env.example`,
-  confirmar `.gitignore` cubre `.env.local` ANTES del primer commit con esto
-- **Seed reproducible**: `supabase/seed.sql` versionado en el repo (1 admin + 1 juez de
-  prueba) en vez de crear datos a mano en el dashboard — cualquiera que clone el repo parte
-  de los mismos datos
-- **Prueba manual obligatoria antes de seguir**: confirmar que un juez no puede leer
+  La policy sobre `jueces` es la que hace posible `SelectJuez.tsx` (0.4.3) — sin ella, la
+  pantalla de selección de juez no tendría nada que leer. Se filtra por `rol='juez'` para
+  no exponer cuentas admin en una lista pública sin auth.
+- Archivos: `supabase/migrations/002_rls.sql`
+- **Prueba manual obligatoria antes de seguir a 0.4**: confirmar que un juez no puede leer
   calificaciones de otro juez, y que un anónimo puede leer `/display` pero no escribir nada
-- **DoD**: políticas RLS verificadas manualmente (documentar qué se probó, no solo "aplicado")
+- **DoD**: ambas pruebas de acceso documentadas y pasando — este DoD debe cumplirse ANTES de empezar 0.4, no en paralelo.
+
+**0.3.4 — Tooling + seed**
+- `npx supabase gen types typescript` → `src/lib/database.types.ts`
+- `src/lib/supabase.ts` (`createClient<Database>()`)
+- **Seed reproducible**: `supabase/seed.sql` versionado en el repo — **1 torneo con
+  `estado='activo'` + 1 admin + 1 juez de prueba asociado a ese torneo** (sin el torneo
+  activo, el juez no tiene `torneo_id` válido y `SelectJuez.tsx` no tendría nada que listar)
+  — en vez de crear datos a mano en el dashboard, así cualquiera que clone el repo parte de
+  los mismos datos
+- Archivos: `src/lib/supabase.ts`, `src/lib/database.types.ts`, `supabase/seed.sql`
+- **DoD**: aplicar migraciones + seed desde cero deja el proyecto en un estado reproducible e idéntico para cualquiera que lo intente.
 
 **0.4 — Auth (selección de juez + PIN, admin)**
-- `useAuth()`: `{ user, role, isLoading, signInJuez(juezId, pin), signInAdmin(email, pass), signOut() }`
-- `LoginAdmin.tsx`: email+password (react-hook-form + zod) → `signInWithPassword`
-- `SelectJuez.tsx`: lista de jueces del torneo activo (lectura pública, cacheable en Dexie)
-- `LoginJuez.tsx`: PIN pad grande (≥60px, sin teclado) → con el `juezId` ya elegido, arma
-  `email = {juezId}@charroapp.internal` y llama `signInWithPassword` con el PIN como password real
+
+Se divide en 4 porque login-admin (trivial) y login-juez (el flujo con más riesgo real de
+todo Fase 0) tenían un solo DoD compartido, ocultando que el modelo de sesión offline
+necesita su propia verificación explícita.
+
+**0.4.1 — Contrato de `useAuth()` + modelo de sesión offline**
+- Forma del hook: `useAuth()` → `{ user, role, isLoading, signInJuez(juezId, pin), signInAdmin(email, pass), signOut() }`
 - Al loguear con éxito: guardar en `@capacitor/preferences` el `access_token`/`refresh_token`
   **y además, por separado, `juez_id` + `role` como valores planos** (no depender de decodificar
   el JWT para saber el rol offline — más simple y no se rompe si cambia el formato del token)
-- Conecta aquí la lógica real de `ProtectedRoute.tsx` (creado como pass-through en 0.2): ahora sí lee `role` y redirige si no corresponde
-- Archivos: `src/features/auth/useAuth.ts`, `LoginAdmin.tsx`, `SelectJuez.tsx`, `LoginJuez.tsx`
-
 - **Decisión de arquitectura crítica — modelo de sesión offline**: escribir en Dexie
   **nunca depende de tener una sesión de Supabase válida**. Solo se necesita el `juez_id`
   cacheado en Preferences desde el último login exitoso. La razón: el access token de
@@ -467,21 +552,81 @@ calificación todavía.
   para refrescarlo, el sync simplemente reintenta cuando vuelva la conexión, sin bloquear
   la calificación local. Primer login siempre requiere conectividad (no hay forma de
   resolver PIN→identidad sin red la primera vez) — esto es una restricción aceptada, no un bug.
-- **DoD**: login de admin y de juez funcionan contra Supabase real; cerrar/reabrir la app no
-  vuelve a pedir credenciales; calificar con el access token ya vencido y sin red sigue
-  escribiendo en Dexie sin error
+- Archivos: `src/features/auth/useAuth.ts`
+- **DoD**: el hook compila y expone la forma correcta (aún sin ninguna pantalla de login conectada).
+
+**0.4.2 — Login admin**
+- `LoginAdmin.tsx`: email+password (react-hook-form + zod) → `signInWithPassword`
+- Archivos: `LoginAdmin.tsx`
+- **DoD**: el admin del seed (0.3.4) puede loguearse contra Supabase real.
+
+**0.4.3 — Login juez (el checkpoint más crítico de Fase 0)**
+- `SelectJuez.tsx`: lista de jueces del torneo activo (lectura pública, cacheable en Dexie)
+- `LoginJuez.tsx`: PIN pad grande (≥60px, sin teclado) → con el `juezId` ya elegido, arma
+  `email = {juezId}@charroapp.internal` y llama `signInWithPassword` con el PIN como password real
+- Archivos: `SelectJuez.tsx`, `LoginJuez.tsx`
+- **DoD**: el juez del seed puede loguearse; y el test que realmente importa — forzar un
+  access token vencido y desconectar la red, y confirmar que escribir en Dexie sigue
+  funcionando sin error (valida en la práctica la decisión de 0.4.1).
+
+**0.4.4 — Integración: rutas protegidas end-to-end**
+- Conectar la lógica real en `ProtectedRoute.tsx` (creado como pass-through en 0.2): ahora sí lee `role` (de Preferences, no del JWT) y redirige si no corresponde
+- Archivos: `src/features/auth/ProtectedRoute.tsx`
+- **DoD**: acceder a `/admin/*` sin sesión redirige a `/login`; un juez autenticado no puede entrar a `/admin/*`.
 
 **0.5 — Dexie + Capacitor nativo**
+
+Se divide en 2 porque son técnicamente independientes — un problema de Xcode/Android SDK
+en la parte de Capacitor no debería bloquear ni confundirse con el estado de Dexie.
+
+**0.5.1 — Dexie schema**
 - `src/db/schema.ts` + `db.ts` (tablas `calificaciones`, `participaciones`, `torneos`, y
-  ahora también `jueces` cacheados para poblar `SelectJuez.tsx` offline)
+  también `jueces` cacheados para poblar `SelectJuez.tsx` offline)
+- Archivos: `src/db/schema.ts`, `src/db/db.ts`
+- **DoD**: Dexie abre en el navegador (DevTools → Application → IndexedDB) con las 4 tablas creadas y vacías.
+
+**0.5.2 — Capacitor nativo**
 - `npx cap init` + plataformas `ios`/`android`; `capacitor.config.ts` (`webDir: 'dist'`,
   `server.url` solo para dev con live-reload, documentado como "quitar en build de producción")
+- **`@capacitor/network` instalado y usado para detectar conectividad** en vez de depender 
+  solo de `navigator.onLine`/evento `online` del navegador — este es conocido por no
+  dispararse de forma confiable en WebView de iOS/Android al recuperar señal real; en web
+  (sin Capacitor) se mantiene el fallback a la API del navegador
 - `npm run build && npx cap sync && npx cap run android` (o `ios`) — confirmar que carga la pantalla de login
-- **DoD**: la app corre visualmente correcta en al menos un simulador nativo
+- Archivos: `capacitor.config.ts`, `src/hooks/useNetworkStatus.ts`
+- **DoD**: la app corre visualmente correcta en al menos un simulador nativo; activar/desactivar modo avión en el simulador/dispositivo hace que `@capacitor/network` reporte el cambio correctamente.
+
+**0.6 — CI básico**
+- GitHub Actions (u equivalente): workflow que corre en cada push/PR: `npm install`, `npm run lint`, `npm run test`, `npm run build`
+- Archivos: `.github/workflows/ci.yml`
+- **DoD**: un push con un error de lint o de test introducido a propósito hace fallar el workflow — prueba que el gate realmente bloquea, no solo que "existe".
+
+---
+
+### Casos de uso — Fase 0
+
+A diferencia de Fase 1+ (que tendrá casos de uso de negocio: calificar, sincronizar, ver
+el tablero), los de Fase 0 son de **infraestructura y acceso** — validan que las
+decisiones de arquitectura de arriba resuelven escenarios reales, no solo que "el comando
+corrió sin error". Cada uno referencia qué sub-fase(s) verifica.
+
+- **UC-0.1 Onboarding de desarrollador**: alguien nuevo clona el repo, corre `npm install && npm run dev`, sin pasos manuales fuera de lo documentado en `.env.example`. → 0.1, 0.3.1
+- **UC-0.2 Primer login de admin (con red)**: el admin de prueba entra con email+password y llega a `/admin`. → 0.4.2, 0.4.4
+- **UC-0.3 Primer login de juez (con red)**: el juez ve la lista de jueces del torneo activo, elige su nombre, teclea su PIN, entra a la app. → 0.3.3, 0.4.3
+- **UC-0.4 Juez reabre la app sin red, horas después**: con sesión cacheada de un login previo y el access token ya vencido, el juez abre la app en modo avión y la app no lo bloquea. → 0.4.1, 0.4.3 — **este es el caso de uso que valida la promesa central de "offline-first" de todo el proyecto**, no solo de Fase 0.
+- **UC-0.5 Público visita `/display` sin cuenta**: un anónimo abre `/display/:torneoId` del torneo activo y ve datos, sin poder loguearse ni escribir nada. → 0.3.3
+- **UC-0.6 Acceso cruzado entre jueces (debe fallar)**: un juez autenticado intenta leer/escribir calificaciones de otro juez vía llamada directa a la API — RLS lo rechaza. → 0.3.3
+- **UC-0.7 Primera corrida en simulador nativo**: la app compilada corre en un simulador Android o iOS y llega hasta la pantalla de login. → 0.5.2
+- **UC-0.8 Regresión de CI**: un desarrollador introduce un error de lint a propósito y el push queda bloqueado por CI antes de llegar a `main`. → 0.6
+
+---
 
 **Riesgos Fase 0**: no fijar Hash vs Browser router desde el inicio obliga a refactor
 doloroso después; no probar RLS antes de construir UI encima esconde huecos de seguridad
-hasta tarde; no confirmar `.gitignore` antes del primer `git add` puede commitear secretos.
+hasta tarde; no confirmar `.gitignore` antes del primer `git add` puede commitear secretos;
+confiar solo en `navigator.onLine` sin `@capacitor/network` puede dar falsos positivos de
+conectividad en nativo; sin el índice único de torneo activo, dos torneos activos
+simultáneos rompen `/display` y el login de jueces de forma silenciosa.
 
 ---
 
