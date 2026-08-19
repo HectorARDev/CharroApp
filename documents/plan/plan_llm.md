@@ -130,10 +130,7 @@ detalle     jsonb                 -- NULL salvo terna_en_ruedo: {"piales": n, "d
 notas       text
 updated_at  timestamptz NOT NULL  -- used for conflict resolution
 synced_at   timestamptz           -- NULL = not synced to server yet
--- RLS: juez can only INSERT/UPDATE WHERE juez_id = auth.uid()
--- RLS: admin can SELECT/UPDATE all
--- RLS: lectura pública (sin auth) en torneos/participaciones/calificaciones del torneo activo — requerido por /display
--- RLS: lectura pública (sin auth) en jueces del torneo activo con rol='juez' — requerido por SelectJuez.tsx (nunca expone cuentas admin)
+-- RLS completo (las 6 tablas, incluye equipos/charros y la función is_admin()): ver Fase 0.3.3
 ```
 
 ---
@@ -263,15 +260,24 @@ CharroApp/
 │   ├── migrations/
 │   │   ├── 001_init.sql
 │   │   └── 002_rls.sql
-│   ├── seed.sql                    # 1 admin + 1 juez de prueba, versionado (Fase 0.3)
+│   ├── seed.sql                    # torneo/equipos/charros de prueba, versionado (Fase 0.3.4)
 │   └── functions/
-│       └── create-juez/
-│           └── index.ts           # crea auth.users + fila en jueces (Fase 1.1)
+│       ├── create-juez/
+│       │   └── index.ts           # crea auth.users + fila en jueces (Fase 1.1)
+│       └── reset-pin/
+│           └── index.ts           # resetea el PIN de un juez existente (Fase 1.1)
+├── scripts/
+│   └── seed-auth.ts               # crea admin+juez de prueba vía Admin API (Fase 0.3.4)
+├── e2e/
+│   └── login-offline.spec.ts      # Playwright: sesión offline con token vencido (Fase 0.4.3)
 ├── .github/
 │   └── workflows/
 │       └── ci.yml                 # lint + test + build en cada push/PR (Fase 0.6)
 ├── capacitor.config.ts
 ├── vite.config.ts
+├── playwright.config.ts
+├── tsconfig.json
+├── .nvmrc
 ├── .env.example
 └── index.html
 ```
@@ -337,8 +343,13 @@ npx cap run ios                      # run on iOS simulator/device
 
 # Supabase
 npx supabase init
-npx supabase db push                 # apply migrations
-npx supabase gen types typescript    # regenerate DB types → src/lib/database.types.ts
+npx supabase db push                 # apply migrations (001_init.sql + 002_rls.sql)
+npm run db:seed                      # seed.sql + scripts/seed-auth.ts (admin+juez de prueba)
+npx supabase gen types typescript --project-id <ref> --schema public > src/lib/database.types.ts
+
+# Tests
+npm run test                         # Vitest
+npx playwright test                  # E2E, incluye simulación de offline
 ```
 
 ---
@@ -359,6 +370,7 @@ npx supabase gen types typescript    # regenerate DB types → src/lib/database.
 [ ] RLS: un juez SÍ puede leer torneos/participaciones del torneo activo ya autenticado (no solo como anónimo)
 [ ] RLS: un anónimo puede leer /display del torneo activo pero no escribir nada
 [ ] RLS: el admin puede crear/editar torneos, equipos, charros y participaciones (policy de escritura admin, no solo lectura)
+[ ] RLS: un anónimo puede leer nombres de equipos/charros del torneo activo (necesario para que /display muestre la tabla de ranking con nombres, no solo IDs)
 [ ] /calificar/:participacionId sin sesión redirige a /login, igual que /admin/*
 [ ] Insertar un segundo torneo con estado='activo' falla (índice único de torneo activo)
 [ ] La app corre visualmente correcta en al menos un simulador nativo (iOS o Android)
@@ -409,10 +421,11 @@ y evitar descubrir errores de diseño a medio camino.
 
 ### FASE 0 — Fundación
 
-**Objetivo global**: cualquiera clona el repo, corre `npm install && npm run dev`, puede
-loguearse como admin o como juez (contra Supabase real), la sesión persiste entre
-reinicios, la app corre al menos una vez en un simulador nativo, y CI corre lint+test+build
-en cada push. Cero lógica de calificación todavía.
+**Objetivo global**: cualquiera clona el repo, crea su propio proyecto Supabase, aplica
+migraciones y seed (ver 0.3.1), y levanta la app con `npm run dev`; puede loguearse como
+admin o como juez (contra Supabase real), la sesión persiste entre reinicios, la app corre
+al menos una vez en un simulador nativo, y CI corre lint+test+build en cada push. Cero
+lógica de calificación todavía.
 
 **Cobertura por área** (sigue siendo un solo codebase — no son 3 proyectos separados; ver
 `## ALTERNATIVAS CONSIDERADAS` si en algún momento se reconsidera):
@@ -442,7 +455,7 @@ no hay con qué probar el login); **0.4.4 depende de 0.4.1 + 0.2** (conecta el h
   que el CLI no rechace el directorio no vacío. No mover ni renombrar `documents/`.
 - `tsconfig.json` con alias `@/*`, `strict: true`; **`vite.config.ts` debe declarar el mismo
   alias en `resolve.alias` (o usar el plugin `vite-tsconfig-paths`)** — el alias en
-  `tsconfig.json` por sí solo solo afecta al type-checker, no a cómo Vite resuelve imports en
+  `tsconfig.json` por sí solo afecta al type-checker, no a cómo Vite resuelve imports en
   runtime; olvidarlo produce un error de import que solo aparece al correr, no al compilar
   tipos. Fijar versión de Node con `.nvmrc`/`engines` en `package.json` (evita "en mi máquina
   sí funciona").
@@ -450,14 +463,17 @@ no hay con qué probar el login); **0.4.4 depende de 0.4.1 + 0.2** (conecta el h
 - Tailwind v4 + `npx shadcn@latest init` en **modo variables CSS** (no utility classes) — define un tono base único en `:root`/`.dark` vía `@theme`. **Decisión de alcance**: solo se deja la arquitectura lista para swapear el tono editando esas variables; NO se construye un selector de color visible para el usuario en Fase 0 (candidato a Fase 3 si hace falta)
 - Estructura de carpetas completa (`src/features/*`, `src/db`, `src/lib`, `src/hooks`) con stubs mínimos
 - Vitest + Testing Library con un smoke test de `<App />`
+- `@playwright/test` instalado (`npx playwright install`) con `playwright.config.ts` mínimo
+  — sin tests todavía en esta sub-fase, solo la herramienta lista. Su primer uso real es la
+  prueba de sesión offline de 0.4.3.
 - `vite-plugin-pwa` registrado en `vite.config.ts` con manifest mínimo (nombre, ícono base,
   `theme_color`) y modo `generateSW`/`injectManifest` acotado a precachear **solo el
   app-shell** (JS/CSS/HTML/estáticos) — implementa aquí la decisión ya tomada en
   `## ARCHITECTURE` de que el Service Worker nunca debe interceptar llamadas a Supabase (eso
   ya lo hace Dexie); dejarlo sin configurar en esta sub-fase es fácil de olvidar más adelante
   porque no bloquea nada visualmente
-- Archivos clave: `vite.config.ts`, `tsconfig.json`, `components.json`, `src/main.tsx`, `src/App.tsx`
-- **DoD**: `npm run dev` muestra una página con un botón de shadcn/ui estilado con el tono base; `npm run test` y `npm run lint` pasan; `npm run build` genera un Service Worker cuyo manifest de precache contiene únicamente assets estáticos del app-shell — cero entradas apuntando a `supabase.co`.
+- Archivos clave: `vite.config.ts`, `tsconfig.json`, `components.json`, `playwright.config.ts`, `src/main.tsx`, `src/App.tsx`
+- **DoD**: `npm run dev` muestra una página con un botón de shadcn/ui estilado con el tono base; `npm run test` y `npm run lint` pasan; `npm run build` genera un Service Worker cuyo manifest de precache contiene únicamente assets estáticos del app-shell — cero entradas apuntando a `supabase.co`; `npx playwright test` corre (aunque sin tests todavía) sin error de configuración.
 
 **0.2 — Routing base + layout**
 - Instalar `react-router` **v7, en modo Declarative** (API equivalente a v6:
@@ -588,6 +604,24 @@ DoD con "crear el proyecto".
   pantalla de selección de juez no tendría nada que leer. Se filtra por `rol='juez'` para
   no exponer cuentas admin en una lista pública sin auth.
 
+  **También `equipos`/`charros` necesitan lectura pública del torneo activo** — sin esta
+  policy, `/display/:torneoId` no podría mostrar nombres de charros/equipos en la tabla de
+  ranking (solo IDs vacíos):
+  ```sql
+  create policy "public read equipos of active torneo" on equipos
+    for select to anon, authenticated using (
+      exists (select 1 from torneos t where t.id = equipos.torneo_id and t.estado = 'activo')
+    );
+
+  create policy "public read charros of active torneo" on charros
+    for select to anon, authenticated using (
+      exists (
+        select 1 from equipos e join torneos t on t.id = e.torneo_id
+        where e.id = charros.equipo_id and t.estado = 'activo'
+      )
+    );
+  ```
+
   **3) Juez: solo sus propias `calificaciones`** (select/insert/update — sin delete, un juez
   nunca borra una calificación ya enviada):
   ```sql
@@ -603,28 +637,49 @@ DoD con "crear el proyecto".
 
   **4) Admin: acceso total en las 6 tablas** — sin esto, `TorneoForm.tsx`/`ParticipacionForm.tsx`
   (Fase 1.1) fallan por RLS en cuanto el paso 1 quede aplicado, porque ninguna policy cubre
-  todavía escritura de admin sobre `torneos`/`equipos`/`charros`/`participaciones`/`jueces`:
+  todavía escritura de admin sobre `torneos`/`equipos`/`charros`/`participaciones`/`jueces`.
+  **No usar un `exists (select 1 from jueces ...)` inline dentro de la policy de `jueces`
+  misma** — sería una policy sobre `jueces` que, para evaluarse, necesita leer `jueces`, y la
+  única fila que probaría que el usuario es admin (la suya propia, con `rol='admin'`) no
+  matchea la policy pública (que solo expone `rol='juez'`) ni la propia policy admin
+  (todavía no evaluada) → el admin quedaría bloqueado de su propia tabla. Se resuelve con una
+  función `security definer`, que al ejecutar con los privilegios del dueño de la función
+  evita ese problema de RLS circular (patrón estándar de Supabase para este caso):
   ```sql
+  create or replace function is_admin()
+  returns boolean
+  language sql
+  security definer
+  set search_path = public
+  stable
+  as $$
+    select exists (select 1 from jueces where id = auth.uid() and rol = 'admin');
+  $$;
+
   create policy "admin full access torneos" on torneos
-    for all to authenticated using (exists (select 1 from jueces j where j.id = auth.uid() and j.rol = 'admin'));
+    for all to authenticated using (is_admin());
   create policy "admin full access equipos" on equipos
-    for all to authenticated using (exists (select 1 from jueces j where j.id = auth.uid() and j.rol = 'admin'));
+    for all to authenticated using (is_admin());
   create policy "admin full access charros" on charros
-    for all to authenticated using (exists (select 1 from jueces j where j.id = auth.uid() and j.rol = 'admin'));
+    for all to authenticated using (is_admin());
   create policy "admin full access participaciones" on participaciones
-    for all to authenticated using (exists (select 1 from jueces j where j.id = auth.uid() and j.rol = 'admin'));
+    for all to authenticated using (is_admin());
   create policy "admin full access jueces" on jueces
-    for all to authenticated using (exists (select 1 from jueces j where j.id = auth.uid() and j.rol = 'admin'));
+    for all to authenticated using (is_admin());
   create policy "admin full access calificaciones" on calificaciones
-    for all to authenticated using (exists (select 1 from jueces j where j.id = auth.uid() and j.rol = 'admin'));
+    for all to authenticated using (is_admin());
   ```
 - Archivos: `supabase/migrations/002_rls.sql`
 - **Prueba manual obligatoria antes de seguir a 0.4**: confirmar que (a) un juez no puede leer
-  calificaciones de otro juez, (b) un anónimo puede leer `/display` pero no escribir nada, (c)
-  con RLS habilitado (paso 1 aplicado) una tabla sin policy explícita deniega todo por
-  default — confirmar esto con una query de un rol sin policy aplicable y esperar 0 filas, no
-  un error, para no confundir "denegado" con "tabla rota".
-- **DoD**: las 3 pruebas de acceso documentadas y pasando — este DoD debe cumplirse ANTES de empezar 0.4, no en paralelo.
+  calificaciones de otro juez, (b) un anónimo puede leer `/display` pero no escribir nada —
+  incluyendo nombres de charros/equipos, no solo torneo/participaciones, (c) con RLS
+  habilitado (paso 1 aplicado) una tabla sin policy explícita deniega todo por default —
+  confirmar esto con una query de un rol sin policy aplicable y esperar 0 filas, no un error,
+  para no confundir "denegado" con "tabla rota", (d) autenticado como el admin del seed
+  (0.3.4), `select is_admin()` devuelve `true` y un `insert`/`update` de prueba en `torneos`
+  funciona — valida que la función `security definer` resuelve el caso circular y no deja al
+  admin bloqueado de su propia tabla.
+- **DoD**: las 4 pruebas de acceso documentadas y pasando — este DoD debe cumplirse ANTES de empezar 0.4, no en paralelo.
 
 **0.3.4 — Tooling + seed**
 - `npx supabase gen types typescript --project-id <ref> --schema public > src/lib/database.types.ts`
@@ -645,6 +700,11 @@ DoD con "crear el proyecto".
      vez de descubrirlo recién en Fase 1.
   3. Exponer ambos pasos como un solo comando: `npm run db:seed` (corre `seed.sql` vía CLI y
      luego `scripts/seed-auth.ts` vía `tsx`/`ts-node`).
+  4. **No es idempotente — a propósito**: el seed asume una base de datos recién migrada.
+     Correrlo dos veces falla de forma explícita, no duplica datos en silencio: el segundo
+     `insert` de torneo activo choca con el índice único (0.3.2) y `auth.admin.createUser()`
+     falla con "usuario ya existe" si el email ya está tomado. Para reiniciar, resetear el
+     proyecto Supabase o borrar las filas de prueba antes de volver a correr `npm run db:seed`.
 - Archivos: `src/lib/supabase.ts`, `src/lib/database.types.ts`, `supabase/seed.sql`, `scripts/seed-auth.ts`
 - **DoD**: `npx supabase db push && npm run db:seed` desde cero deja el proyecto en un estado reproducible e idéntico para cualquiera que lo intente, incluyendo el admin y el juez de prueba ya logueables.
 
@@ -685,10 +745,13 @@ necesita su propia verificación explícita.
 - `SelectJuez.tsx`: lista de jueces del torneo activo (lectura pública, cacheable en Dexie)
 - `LoginJuez.tsx`: PIN pad grande (≥60px, sin teclado) → con el `juezId` ya elegido, arma
   `email = {juezId}@charroapp.internal` y llama `signInWithPassword` con el PIN como password real
-- Archivos: `SelectJuez.tsx`, `LoginJuez.tsx`
+- Archivos: `SelectJuez.tsx`, `LoginJuez.tsx`, `e2e/login-offline.spec.ts`
 - **DoD**: el juez del seed puede loguearse; y el test que realmente importa — forzar un
   access token vencido y desconectar la red, y confirmar que escribir en Dexie sigue
-  funcionando sin error (valida en la práctica la decisión de 0.4.1).
+  funcionando sin error (valida en la práctica la decisión de 0.4.1). **Automatizado con
+  Playwright** (`context.setOffline(true)`, instalado en 0.1) en vez de quedar solo como
+  prueba manual — es exactamente el caso para el que el stack ya incluye Playwright, y deja
+  este checkpoint crítico protegido en CI, no solo verificado una vez a mano.
 
 **0.4.4 — Integración: rutas protegidas end-to-end**
 - Conectar la lógica real en `ProtectedRoute.tsx` (creado como pass-through en 0.2, ya
@@ -731,9 +794,8 @@ en la parte de Capacitor no debería bloquear ni confundirse con el estado de De
 - GitHub Actions (u equivalente): workflow que corre en cada push/PR: `npm install`, `npm run lint`, `npm run test`, `npm run build`. **El step `actions/setup-node` debe leer la
   misma versión fijada en `.nvmrc` (0.1)** (`node-version-file: '.nvmrc'`) en vez de un
   número hardcodeado aparte — evita que CI y desarrollo local diverjan silenciosamente.
-- **Decisión de hosting web** (pendiente hasta ahora — "Web browser" es una de las 3
-  plataformas del alcance del proyecto, pero ninguna sub-fase decía dónde vive `dist/` para
-  que un admin o el público en `/display` lo visiten sin pasar por Capacitor): desplegar el
+- **Decisión de hosting web** ("Web browser" es una de las 3 plataformas del alcance del
+  proyecto — admin y `/display` deben ser accesibles sin pasar por Capacitor): desplegar el
   build web (`npm run build` → `dist/`) en un host estático con preview deploys por PR
   (Vercel/Netlify/Cloudflare Pages — cualquiera sirve, no hay requisito técnico que
   desempate). El build nativo (Capacitor) sigue empaquetando assets localmente y no depende
@@ -757,7 +819,10 @@ el tablero), los de Fase 0 son de **infraestructura y acceso** — validan que l
 decisiones de arquitectura de arriba resuelven escenarios reales, no solo que "el comando
 corrió sin error". Cada uno referencia qué sub-fase(s) verifica.
 
-- **UC-0.1 Onboarding de desarrollador**: alguien nuevo clona el repo, corre `npm install && npm run dev`, sin pasos manuales fuera de lo documentado en `.env.example`. → 0.1, 0.3.1
+- **UC-0.1 Onboarding de desarrollador**: alguien nuevo clona el repo, crea su propio
+  proyecto Supabase (0.3.1), y corre `npm install` → `npx supabase db push` → `npm run
+  db:seed` → `npm run dev` — sin más pasos manuales que esos, y sin necesitar credenciales de
+  nadie más del equipo. → 0.1, 0.3.1, 0.3.4
 - **UC-0.2 Primer login de admin (con red)**: el admin de prueba entra con email+password y llega a `/admin`. → 0.4.2, 0.4.4
 - **UC-0.3 Primer login de juez (con red)**: el juez ve la lista de jueces del torneo activo, elige su nombre, teclea su PIN, entra a la app. → 0.3.3, 0.4.3
 - **UC-0.4 Juez reabre la app sin red, horas después**: con sesión cacheada de un login previo y el access token ya vencido, el juez abre la app en modo avión y la app no lo bloquea. → 0.4.1, 0.4.3 — **este es el caso de uso que valida la promesa central de "offline-first" de todo el proyecto**, no solo de Fase 0.

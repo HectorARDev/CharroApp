@@ -36,14 +36,6 @@ fechas de calendario porque todavía no hay fecha de inicio confirmada, y el rit
 ajustar estos números una vez que se complete la Etapa 0 (primer punto donde se tiene
 evidencia real de la velocidad de avance):
 
-```
-Semana:        1    2    3    4    5    6    7    8    9    10   11+
-Etapa 0        ███████████
-Etapa 1                    ███████████
-Etapa 2                                ████████████████████
-Etapa 3                                                     (backlog, sin fecha fija)
-```
-
 - **Etapa 0**: semanas 1–3
 - **Etapa 1**: semanas 4–6 — punto en el que el sistema ya es útil para un torneo real (una sola suerte)
 - **Etapa 2**: semanas 7–10 — reglamento completo
@@ -96,5 +88,6 @@ aplicación web instalable sin pasar por ninguna tienda.
 ## Qué no cubre este documento
 
 Aquí no se detalla cómo está construido el sistema (tecnologías, base de datos, seguridad) —
-esa información vive en `plan.md`, pensado para el equipo de desarrollo. Este documento se
-actualiza cada vez que cambie el alcance, el cronograma o los costos estimados.
+esa información vive en `plan.md` (decisiones y su porqué, para el equipo de desarrollo) y,
+con el detalle exacto de ejecución, en `plan_llm.md`. Este documento se actualiza cada vez
+que cambie el alcance, el cronograma o los costos estimados.

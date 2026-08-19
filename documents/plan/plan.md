@@ -45,7 +45,7 @@ Cada tecnología fue revisada explícitamente contra alternativas antes de fijar
 | **Tailwind CSS v4 + shadcn/ui** (modo variables CSS) | Estilos | Componentes accesibles (Radix) y totalmente editables — clave para el requisito de botones ≥60px/alto contraste. El modo de variables CSS deja un tono base único definido desde el día 1, con la arquitectura ya lista para cambiarlo después sin tocar componentes (no se construye un selector de color visible al usuario todavía — eso queda como candidato de Fase 3). |
 | **Zustand** | Estado global | API mínima, sin boilerplate, funciona bien offline-first. Redux Toolkit sería sobre-ingeniería para el tamaño real del estado de esta app. |
 | **TanStack Query** | Data fetching + cache | Su rol es exclusivamente para lecturas no-críticas que toleran un modelo red-primero-cache-después (listados de torneos, dashboard admin) — **nunca** para el camino crítico de escritura de calificaciones, que pasa por Dexie + el sync engine propio. Mezclar ambas responsabilidades es la forma más común de introducir bugs de datos duplicados/perdidos. |
-| **Vitest + Testing Library + Playwright** | Testing | Ausente del plan original, pese a ser una app donde un bug de sync/conflicto en vivo es costoso (evento en curso, sin segunda oportunidad). Playwright permite simular offline para probar el flujo completo sin depender solo de pruebas manuales. |
+| **Vitest + Testing Library + Playwright** | Testing | Ausente del plan original, pese a ser una app donde un bug de sync/conflicto en vivo es costoso (evento en curso, sin segunda oportunidad). Playwright permite simular offline para probar el flujo completo sin depender solo de pruebas manuales — se instala desde Fase 0 y su primer uso real es automatizar la prueba de sesión offline (login juez con token vencido), el checkpoint más crítico de esa fase. |
 | **ESLint + Prettier** | Calidad de código | Hueco menor del plan original, cerrado junto con el resto del scaffolding en Fase 0. |
 
 ### Almacenamiento Offline
@@ -172,8 +172,11 @@ CharroApp/
 │   └── hooks/
 ├── supabase/
 │   ├── migrations/          # SQL versionado
-│   ├── seed.sql             # datos de prueba reproducibles
-│   └── functions/           # Edge Functions (ej. alta de jueces)
+│   ├── seed.sql             # datos de negocio de prueba (torneo/equipos/charros)
+│   └── functions/           # Edge Functions (alta de jueces, reseteo de PIN)
+├── scripts/
+│   └── seed-auth.ts         # crea admin+juez de prueba vía Admin API de Supabase
+├── e2e/                     # Playwright — incluye la prueba de sesión offline
 ├── .github/workflows/       # CI: lint + test + build en cada push
 ├── capacitor.config.ts
 └── vite.config.ts
@@ -191,14 +194,14 @@ Tablas principales:
 - `calificaciones` — puntuación, `juez_id`, `participacion_id`, `updated_at`/`synced_at` (control de sync), `detalle` (sub-puntajes para suertes de equipo).
 - `jueces` — perfil + rol + torneo asignado. Sin columna de PIN propia: el PIN es directamente el password de la cuenta de autenticación asociada.
 
-RLS: cada juez solo lee/escribe sus propias calificaciones; el admin tiene acceso completo (verificado con una función `security definer` — comprobar el rol admin con una subconsulta directa sobre `jueces` deja al propio admin bloqueado de su tabla, porque esa subconsulta también queda sujeta a RLS); existe una política de **lectura pública** (torneos, participaciones, calificaciones y jueces del torneo activo) que es lo que hace posible tanto `/display` como la pantalla de selección de juez antes de loguearse — esa política aplica tanto a usuarios anónimos como a jueces ya autenticados (son roles de Postgres distintos; limitarla solo a anónimos deja a un juez logueado sin poder leer el torneo que necesita calificar). RLS debe habilitarse explícitamente tabla por tabla antes de que cualquier política tenga efecto — es el paso que más fácil se olvida porque, si falta, no da error: simplemente deja todo abierto.
+RLS: cada juez solo lee/escribe sus propias calificaciones; el admin tiene acceso completo (verificado con una función `security definer` — comprobar el rol admin con una subconsulta directa sobre `jueces` deja al propio admin bloqueado de su tabla, porque esa subconsulta también queda sujeta a RLS); existe una política de **lectura pública** (torneos, participaciones, calificaciones, jueces y también equipos/charros — `/display` necesita sus nombres para la tabla de ranking, no solo IDs) del torneo activo, que es lo que hace posible tanto `/display` como la pantalla de selección de juez antes de loguearse — esa política aplica tanto a usuarios anónimos como a jueces ya autenticados (son roles de Postgres distintos; limitarla solo a anónimos deja a un juez logueado sin poder leer el torneo que necesita calificar). RLS debe habilitarse explícitamente tabla por tabla antes de que cualquier política tenga efecto — es el paso que más fácil se olvida porque, si falta, no da error: simplemente deja todo abierto.
 
 ---
 
 ## Verificación (Plan de pruebas)
 
 1. **Offline**: Desactivar red → calificar → verificar en Dexie → reconectar → verificar que aparece en Supabase.
-2. **Sesión offline**: con el access token ya vencido y sin red, calificar debe seguir funcionando sin error — es la prueba que valida la promesa central del proyecto.
+2. **Sesión offline**: con el access token ya vencido y sin red, calificar debe seguir funcionando sin error — es la prueba que valida la promesa central del proyecto. Automatizada con Playwright (`context.setOffline(true)`) desde Fase 0, no solo verificada a mano una vez.
 3. **Tiempo real**: Admin dashboard + tablero abiertos → un juez envía calificación → ambas pantallas se actualizan en menos de 1 segundo.
 4. **Seguridad**: un juez no puede leer calificaciones de otro juez; un anónimo puede leer `/display` pero no escribir nada — probado manualmente antes de construir UI encima, no después.
 5. **Conflictos**: dos jueces envían puntaje diferente para el mismo participante → last_write_wins resuelve correctamente.
@@ -216,7 +219,7 @@ Fase 0 se dividió en 6 sub-fases, cada una con su propio criterio de aceptació
 
 1. **Scaffolding** — proyecto, lint/format, tema visual base, estructura de carpetas, testing, `vite-plugin-pwa` configurado para precachear solo el app-shell (nunca llamadas a Supabase).
 2. **Routing + layout** — rutas de las 4 áreas, protección de rutas (esqueleto), code-splitting. `/login` resuelve selección de juez + PIN como un solo flujo (el PIN es un estado interno, no una ruta aparte); `/login/admin` es la ruta separada para el login de administrador. La protección de rutas cubre tanto `/admin/*` como `/calificar/:participacionId` — solo `/display` es intencionalmente pública.
-3. **Supabase** — proyecto (en la región disponible más cercana a México, por latencia de Realtime en un evento en vivo), schema, políticas de seguridad (con su propio checkpoint de verificación antes de continuar — ver la nota de RLS más abajo), datos de prueba reproducibles. El seed de prueba se arma en dos piezas: los datos de negocio (torneo/equipos/charros) vía SQL, y el admin+juez de prueba vía un script que usa la Admin API de Supabase — igual que `auth.users` no se puede poblar de forma confiable con un `INSERT` directo, se necesita el mismo mecanismo que después usa la función de alta de jueces en Fase 1.
+3. **Supabase** — proyecto (en la región disponible más cercana a México, por latencia de Realtime en un evento en vivo), schema, políticas de seguridad (con su propio checkpoint de verificación antes de continuar — ver la nota de RLS más abajo), datos de prueba reproducibles. El seed de prueba se arma en dos piezas: los datos de negocio (torneo/equipos/charros) vía SQL, y el admin+juez de prueba vía un script que usa la Admin API de Supabase — igual que `auth.users` no se puede poblar de forma confiable con un `INSERT` directo, se necesita el mismo mecanismo que después usa la función de alta de jueces en Fase 1. El seed no es idempotente a propósito: correrlo dos veces sobre la misma base falla de forma explícita (índice único de torneo activo, "usuario ya existe" en Auth), no duplica datos en silencio — para reiniciar, hay que resetear el proyecto o borrar las filas de prueba primero.
 4. **Auth** — el hook de autenticación y su contrato de sesión offline (login/registro retornan `{ error }`, no lanzan excepción — un PIN equivocado es un resultado esperado, no algo excepcional), login admin, login juez (el checkpoint más crítico de toda la fase), integración de rutas protegidas.
 5. **Dexie + Capacitor nativo** — almacén local y primera corrida en simulador. Se fija explícitamente una versión mínima de OS/SDK (Android/iOS) acorde al hardware real que suele usarse en un lienzo charro — no es un dominio con dispositivos de último modelo.
 6. **CI básico + hosting web** — CI que realmente bloquee, no solo que exista, usando la misma versión de Node que el resto del equipo (fijada en `.nvmrc`); además la decisión de dónde se despliega el build web (`dist/`) para que admin y `/display` sean accesibles desde una URL real, no solo `localhost`, con sus propias variables de entorno configuradas en el host (apuntando al proyecto Supabase de cada developer).
