@@ -105,10 +105,12 @@ Supabase (servidor)
 ## Módulos del Proyecto
 
 ### 1. Auth
-- Login de juez en 2 pasos: selección de nombre (lista del torneo activo) → PIN pad. Evita depender de un identificador críptico y resuelve el problema de que un PIN por sí solo no identifica a la persona.
+- Login de juez en 2 pasos: selección de nombre (lista del torneo activo) → PIN pad. Evita depender de un identificador críptico y resuelve el problema de que un PIN por sí solo no identifica a la persona. El PIN es de **6 dígitos**, no 4 — Supabase Auth exige un mínimo de 6 caracteres de password por default, y el PIN se usa directamente como password real.
+- Cada cuenta (juez o admin) se crea con `email_confirm: true` en la Admin API — sus emails son sintéticos (`{id}@charroapp.internal`) que nunca reciben ni confirman un correo real; sin este flag, Supabase Auth bloquearía el login de todo el mundo con "Email not confirmed", sin importar que el resto de la seguridad esté bien.
 - Login email/contraseña para admin.
 - Roles: `admin`, `juez`. La alta de jueces siempre pasa por una función de servidor (Edge Function con permisos elevados) que crea la cuenta y la fila del juez en una sola operación — nunca se inserta un juez directo en la tabla pública.
 - Reseteo de PIN (Fase 1): un juez olvidando su PIN en cancha es un escenario probable en un evento real; se resuelve con una Edge Function `reset-pin` (mismo patrón que la de alta), en vez de dejarlo como reseteo manual ad-hoc.
+- Desactivar juez (`jueces.activo`, desde Fase 0 a nivel de schema/RLS): un juez desactivado deja de aparecer en la selección de jueces y no puede seguir sincronizando calificaciones — se prefiere sobre borrar la fila porque `calificaciones.juez_id` tiene `ON DELETE RESTRICT` (no se pierde el historial de puntajes de un juez que ya no participa). El botón de administración para alternarlo se agrega en Fase 1 (junto a `reset-pin`), no en Fase 0.
 
 ### 2. Gestión de Torneos
 - Crear torneo, agregar equipos/charros.

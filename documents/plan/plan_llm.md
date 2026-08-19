@@ -120,6 +120,7 @@ id          uuid PRIMARY KEY DEFAULT gen_random_uuid()  -- = auth.users.id
 torneo_id   uuid REFERENCES torneos(id)
 nombre      text NOT NULL
 rol         text CHECK (rol IN ('admin','juez')) DEFAULT 'juez'
+activo      boolean NOT NULL DEFAULT true  -- desactivar en vez de borrar (ver ON DELETE RESTRICT en calificaciones.juez_id, Fase 0.3.2); false = no aparece en SelectJuez.tsx ni puede seguir calificando vía Supabase
 
 -- calificaciones
 id          uuid PRIMARY KEY DEFAULT gen_random_uuid()
@@ -159,7 +160,8 @@ paso_de_la_muerte       individual  0–10    0.5   Yes     2     Time + executi
 
 ### 1. auth
 - Judge login (2 pasos, ver Fase 0.4): 1) `SelectJuez.tsx` — lista de jueces del torneo
-  activo (lectura pública, sin auth); 2) `LoginJuez.tsx` — PIN pad → con el `juez.id` ya
+  activo (lectura pública, sin auth); 2) `LoginJuez.tsx` — PIN pad, PIN de 6 dígitos (mínimo
+  de password que exige Supabase Auth por default, ver 0.4.3) → con el `juez.id` ya
   elegido, `supabase.auth.signInWithPassword` (email derivado de `juez.id@charroapp.internal`,
   password = PIN). El PIN es el password real de `auth.users`, no se guarda un hash aparte.
 - Admin login: email + password
@@ -169,7 +171,7 @@ paso_de_la_muerte       individual  0–10    0.5   Yes     2     Time + executi
 
 ### 2. torneos
 - CRUD for torneos, equipos, charros (admin only)
-- Bulk import charros via CSV (Fase 2)
+- Bulk import charros via CSV (Fase 3 — ver 3.2, no hay sub-fase de Fase 2 que lo construya)
 - Hook: `useTorneo(id)` → torneo + participaciones cached in Dexie
 
 ### 3. calificacion (core)
@@ -195,8 +197,8 @@ paso_de_la_muerte       individual  0–10    0.5   Yes     2     Time + executi
 ### 5. dashboard (admin)
 - Real-time table of all calificaciones for active torneo
 - Supabase Realtime subscription: `postgres_changes` on `calificaciones`
-- Edit/override with audit log (separate `auditoria` table, Fase 2)
-- Export: `json → csv` client-side via `papaparse`
+- Edit/override with audit log (separate `auditoria` table, Fase 3 — ver 3.3, no Fase 2)
+- Export: `json → csv` client-side via `papaparse` (Fase 3 — ver 3.1)
 
 ### 6. tablero (public display)
 - Route: `/display/:torneoId` — no auth required, read-only
@@ -321,7 +323,7 @@ db.version(1).stores({
   calificaciones: '++id, participacion_id, juez_id, synced',
   participaciones: 'id, torneo_id, suerte',
   torneos: 'id',
-  jueces: 'id, torneo_id',   // cacheado para poblar SelectJuez.tsx offline (Fase 0.5)
+  jueces: 'id, torneo_id',   // cache de solo-lectura para que SelectJuez.tsx muestre algo razonable sin red (ver nota en Fase 0.4.3 — no permite COMPLETAR un login sin red, eso sigue requiriendo conectividad)
 })
 ```
 
@@ -361,6 +363,7 @@ npx playwright test                  # E2E, incluye simulación de offline
 [ ] npm install → .env.local propio (proyecto Supabase propio, 0.3.1) → npx supabase db push → npm run db:seed → npm run dev levanta la app sin más pasos manuales que esos 4 comandos
 [ ] npm run lint, npm run test, npm run build pasan
 [ ] CI bloquea un push con lint/test roto a propósito (0.6); CI usa la misma versión de Node que .nvmrc
+[ ] CI corre npx playwright test contra el proyecto Supabase dedicado a CI (con sus secrets configurados) y pasa, no solo lint/test/build
 [ ] Admin de prueba (seed) puede loguearse con email+password
 [ ] Juez de prueba (seed) puede loguearse vía selección de nombre + PIN
 [ ] Sesión persiste tras cerrar/reabrir la app (sin pedir credenciales de nuevo)
@@ -371,6 +374,7 @@ npx playwright test                  # E2E, incluye simulación de offline
 [ ] RLS: un anónimo puede leer /display del torneo activo pero no escribir nada
 [ ] RLS: el admin puede crear/editar torneos, equipos, charros y participaciones (policy de escritura admin, no solo lectura)
 [ ] RLS: un anónimo puede leer nombres de equipos/charros del torneo activo (necesario para que /display muestre la tabla de ranking con nombres, no solo IDs)
+[ ] RLS: un juez con jueces.activo=false desaparece de SelectJuez.tsx y no puede insertar/actualizar calificaciones, aunque su sesión de Supabase siga siendo válida
 [ ] /calificar/:participacionId sin sesión redirige a /login, igual que /admin/*
 [ ] Insertar un segundo torneo con estado='activo' falla (índice único de torneo activo)
 [ ] La app corre visualmente correcta en al menos un simulador nativo (iOS o Android)
@@ -463,16 +467,18 @@ no hay con qué probar el login); **0.4.4 depende de 0.4.1 + 0.2** (conecta el h
 - Tailwind v4 + `npx shadcn@latest init` en **modo variables CSS** (no utility classes) — define un tono base único en `:root`/`.dark` vía `@theme`. **Decisión de alcance**: solo se deja la arquitectura lista para swapear el tono editando esas variables; NO se construye un selector de color visible para el usuario en Fase 0 (candidato a Fase 3 si hace falta)
 - Estructura de carpetas completa (`src/features/*`, `src/db`, `src/lib`, `src/hooks`) con stubs mínimos
 - Vitest + Testing Library con un smoke test de `<App />`
-- `@playwright/test` instalado (`npx playwright install`) con `playwright.config.ts` mínimo
-  — sin tests todavía en esta sub-fase, solo la herramienta lista. Su primer uso real es la
-  prueba de sesión offline de 0.4.3.
+- `@playwright/test` instalado (`npx playwright install`) con `playwright.config.ts` mínimo,
+  incluyendo `webServer` configurado para levantar `npm run preview` (o `dev`) automáticamente
+  antes de correr tests — así ni un developer ni CI (0.6) necesitan levantar el servidor a
+  mano por separado. Sin tests todavía en esta sub-fase, solo la herramienta lista. Su primer
+  uso real es la prueba de sesión offline de 0.4.3.
 - `vite-plugin-pwa` registrado en `vite.config.ts` con manifest mínimo (nombre, ícono base,
   `theme_color`) y modo `generateSW`/`injectManifest` acotado a precachear **solo el
   app-shell** (JS/CSS/HTML/estáticos) — implementa aquí la decisión ya tomada en
   `## ARCHITECTURE` de que el Service Worker nunca debe interceptar llamadas a Supabase (eso
   ya lo hace Dexie); dejarlo sin configurar en esta sub-fase es fácil de olvidar más adelante
   porque no bloquea nada visualmente
-- Archivos clave: `vite.config.ts`, `tsconfig.json`, `components.json`, `playwright.config.ts`, `src/main.tsx`, `src/App.tsx`
+- Archivos clave: `vite.config.ts`, `tsconfig.json`, `components.json`, `playwright.config.ts`, `.nvmrc`, `src/main.tsx`, `src/App.tsx`
 - **DoD**: `npm run dev` muestra una página con un botón de shadcn/ui estilado con el tono base; `npm run test` y `npm run lint` pasan; `npm run build` genera un Service Worker cuyo manifest de precache contiene únicamente assets estáticos del app-shell — cero entradas apuntando a `supabase.co`; `npx playwright test` corre (aunque sin tests todavía) sin error de configuración.
 
 **0.2 — Routing base + layout**
@@ -502,7 +508,7 @@ no hay con qué probar el login); **0.4.4 depende de 0.4.1 + 0.2** (conecta el h
   codebase/repo. Da buena parte del beneficio de "separar" sin la complejidad de un monorepo.
 - Placeholders de texto por ruta; `AppLayout.tsx` con header/nav mínimos
 - Archivos: `src/routes/index.tsx`, `src/routes/NotFound.tsx`, `src/layouts/AppLayout.tsx`, `src/features/auth/ProtectedRoute.tsx`
-- **DoD**: navegar manualmente entre las 4 rutas funciona en `npm run dev`; una ruta inexistente muestra `NotFound`, no pantalla en blanco.
+- **DoD**: navegar manualmente entre las 5 rutas listadas arriba funciona en `npm run dev`; una ruta inexistente muestra `NotFound`, no pantalla en blanco.
 
 **0.3 — Supabase: proyecto, schema, RLS**
 
@@ -546,7 +552,7 @@ DoD con "crear el proyecto".
   - `participaciones.torneo_id` → `ON DELETE CASCADE` (si se borra el torneo, sus participaciones no tienen sentido)
   - `participaciones.charro_id`, `participaciones.equipo_id` → `ON DELETE CASCADE`
   - `calificaciones.participacion_id` → `ON DELETE CASCADE`
-  - `calificaciones.juez_id` → `ON DELETE RESTRICT` (evita borrar un juez con historial de puntajes y perder el registro; para desactivar un juez se usa un estado/flag, no un DELETE)
+  - `calificaciones.juez_id` → `ON DELETE RESTRICT` (evita borrar un juez con historial de puntajes y perder el registro; para desactivar un juez se usa `jueces.activo = false`, ver más abajo, no un DELETE)
   - `jueces.torneo_id` → `ON DELETE CASCADE`
   - **Limitación aceptada**: `jueces.id = auth.users.id`, pero borrar una fila de `jueces` en
     cascada (por ejemplo al borrar su torneo) **no** borra el `auth.users` asociado — queda una
@@ -597,12 +603,14 @@ DoD con "crear el proyecto".
   create policy "public read jueces of active torneo" on jueces
     for select to anon, authenticated using (
       rol = 'juez'
+      and activo = true
       and exists (select 1 from torneos t where t.id = jueces.torneo_id and t.estado = 'activo')
     );
   ```
   La policy sobre `jueces` es la que hace posible `SelectJuez.tsx` (0.4.3) — sin ella, la
   pantalla de selección de juez no tendría nada que leer. Se filtra por `rol='juez'` para
-  no exponer cuentas admin en una lista pública sin auth.
+  no exponer cuentas admin en una lista pública sin auth, y por `activo = true` para que un
+  juez desactivado deje de aparecer en la lista de selección.
 
   **También `equipos`/`charros` necesitan lectura pública del torneo activo** — sin esta
   policy, `/display/:torneoId` no podría mostrar nombres de charros/equipos en la tabla de
@@ -623,17 +631,37 @@ DoD con "crear el proyecto".
   ```
 
   **3) Juez: solo sus propias `calificaciones`** (select/insert/update — sin delete, un juez
-  nunca borra una calificación ya enviada):
+  nunca borra una calificación ya enviada). Las 3 exigen además `activo = true` en su propia
+  fila de `jueces` — un juez desactivado con sesión de Supabase todavía válida no debe poder
+  seguir leyendo ni escribiendo vía red. Esta subconsulta **no** tiene el problema circular de
+  `is_admin()` (punto 4 más abajo): vive en una policy de `calificaciones`, no de `jueces`
+  misma, y la policy pública del punto 2 ya permite que un juez lea su propia fila (matchea
+  `rol='juez'` + `activo=true` + torneo activo), así que se resuelve sin necesitar una función
+  `security definer`:
   ```sql
   create policy "juez read own calificaciones" on calificaciones
-    for select to authenticated using (juez_id = auth.uid());
+    for select to authenticated using (
+      juez_id = auth.uid()
+      and exists (select 1 from jueces j where j.id = auth.uid() and j.activo = true)
+    );
 
   create policy "juez insert own calificaciones" on calificaciones
-    for insert to authenticated with check (juez_id = auth.uid());
+    for insert to authenticated with check (
+      juez_id = auth.uid()
+      and exists (select 1 from jueces j where j.id = auth.uid() and j.activo = true)
+    );
 
   create policy "juez update own calificaciones" on calificaciones
-    for update to authenticated using (juez_id = auth.uid()) with check (juez_id = auth.uid());
+    for update to authenticated using (juez_id = auth.uid()) with check (
+      juez_id = auth.uid()
+      and exists (select 1 from jueces j where j.id = auth.uid() and j.activo = true)
+    );
   ```
+  **Limitación aceptada**: esto bloquea el *sync* hacia Supabase, no la escritura local en
+  Dexie — el modelo de sesión offline (0.4.1) ya establece que calificar nunca depende de una
+  sesión válida, así que un juez desactivado que ya estaba calificando sin red puede seguir
+  escribiendo localmente; su intento de sync fallará silenciosamente hasta que se investigue
+  el motivo. No se agrega manejo especial de este caso en Fase 0/1.
 
   **4) Admin: acceso total en las 6 tablas** — sin esto, `TorneoForm.tsx`/`ParticipacionForm.tsx`
   (Fase 1.1) fallan por RLS en cuanto el paso 1 quede aplicado, porque ninguna policy cubre
@@ -653,7 +681,7 @@ DoD con "crear el proyecto".
   set search_path = public
   stable
   as $$
-    select exists (select 1 from jueces where id = auth.uid() and rol = 'admin');
+    select exists (select 1 from jueces where id = auth.uid() and rol = 'admin' and activo = true);
   $$;
 
   create policy "admin full access torneos" on torneos
@@ -678,8 +706,11 @@ DoD con "crear el proyecto".
   para no confundir "denegado" con "tabla rota", (d) autenticado como el admin del seed
   (0.3.4), `select is_admin()` devuelve `true` y un `insert`/`update` de prueba en `torneos`
   funciona — valida que la función `security definer` resuelve el caso circular y no deja al
-  admin bloqueado de su propia tabla.
-- **DoD**: las 4 pruebas de acceso documentadas y pasando — este DoD debe cumplirse ANTES de empezar 0.4, no en paralelo.
+  admin bloqueado de su propia tabla, (e) con el juez del seed puesto en `activo = false`
+  manualmente, ya no aparece en la policy pública de `jueces` y un `insert` de prueba en
+  `calificaciones` con su `juez_id` falla — confirma que el mecanismo de desactivación
+  (0.3.2) realmente bloquea, no solo existe la columna.
+- **DoD**: las 5 pruebas de acceso documentadas y pasando — este DoD debe cumplirse ANTES de empezar 0.4, no en paralelo.
 
 **0.3.4 — Tooling + seed**
 - `npx supabase gen types typescript --project-id <ref> --schema public > src/lib/database.types.ts`
@@ -691,9 +722,13 @@ DoD con "crear el proyecto".
      charros de prueba (sin el torneo activo, `SelectJuez.tsx` no tendría nada que listar).
      Aplicado automáticamente por `supabase db push` o corrido manual con `psql`/SQL editor.
   2. `scripts/seed-auth.ts`: crea **1 admin + 1 juez de prueba** usando
-     `supabase.auth.admin.createUser()` (Admin API, requiere la **service role key** —
-     nunca se commitea, se lee de `.env.local`) y luego inserta su fila correspondiente en
-     `jueces`. **Por qué no basta con `seed.sql`**: `auth.users` no se puede poblar de forma
+     `supabase.auth.admin.createUser({ email, password, email_confirm: true })` (Admin API,
+     requiere la **service role key** — nunca se commitea, se lee de `.env.local`) y luego
+     inserta su fila correspondiente en `jueces`. **`email_confirm: true` es obligatorio, no
+     opcional**: los emails son sintéticos (`{id}@charroapp.internal`) que nunca reciben ni
+     pueden confirmar un correo real — sin este flag, Supabase Auth bloquea
+     `signInWithPassword` con "Email not confirmed" y nadie puede loguearse, sin importar que
+     RLS/schema estén perfectos. **Por qué no basta con `seed.sql`**: `auth.users` no se puede poblar de forma
      confiable con un `INSERT` SQL directo (requiere hash de password correcto y columnas
      internas del sistema de auth) — es el mismo problema que resuelve la Edge Function
      `create-juez` en Fase 1.1, y usar aquí el mismo patrón (Admin API) lo valida temprano en
@@ -715,7 +750,10 @@ todo Fase 0) tenían un solo DoD compartido, ocultando que el modelo de sesión 
 necesita su propia verificación explícita.
 
 **0.4.1 — Contrato de `useAuth()` + modelo de sesión offline**
-- Forma del hook: `useAuth()` → `{ user, role, isLoading, signInJuez(juezId, pin), signInAdmin(email, pass), signOut() }`
+- Forma del hook: `useAuth()` → `{ user, role, isLoading, signInJuez(juezId, pin), signInAdmin(email, pass), signOut() }`.
+  `signOut()` limpia tanto la sesión de Supabase como los valores planos de `@capacitor/preferences`
+  (`juez_id`/`role`) — dejar cualquiera de los dos no invalida la sesión visible, pero sí
+  puede confundir un siguiente login en el mismo dispositivo compartido entre jueces.
 - **Contrato de error**: `signInJuez`/`signInAdmin` **retornan** `{ error }` (mismo estilo que
   el SDK de Supabase) en vez de lanzar excepción — evita que cada formulario tenga que
   envolver la llamada en `try/catch`; un PIN o password incorrecto es un resultado esperado
@@ -742,9 +780,19 @@ necesita su propia verificación explícita.
 - **DoD**: el admin del seed (0.3.4) puede loguearse contra Supabase real.
 
 **0.4.3 — Login juez (el checkpoint más crítico de Fase 0)**
-- `SelectJuez.tsx`: lista de jueces del torneo activo (lectura pública, cacheable en Dexie)
-- `LoginJuez.tsx`: PIN pad grande (≥60px, sin teclado) → con el `juezId` ya elegido, arma
-  `email = {juezId}@charroapp.internal` y llama `signInWithPassword` con el PIN como password real
+- `SelectJuez.tsx`: al montar, si hay red, hace `select` de la policy pública de `jueces`
+  (0.3.3) y hace `bulkPut` en `Dexie.jueces`; siempre renderiza desde Dexie (no directo de la
+  respuesta de red) para que abrir la pantalla sin red muestre la última lista conocida en
+  vez de una pantalla vacía. **Esto no habilita completar un login sin red** — 0.4.1 ya
+  estableció que el primer login siempre requiere conectividad (no hay forma de resolver
+  PIN→identidad offline); el cache solo evita una UI rota, el botón de login sigue
+  necesitando red y debe mostrar un error claro si se intenta sin ella.
+- `LoginJuez.tsx`: PIN pad grande (≥60px, sin teclado), **PIN de exactamente 6 dígitos** — no
+  4 (el PIN tradicional de cajero), porque Supabase Auth exige un mínimo de 6 caracteres de
+  password por default; usar menos de 6 rompe `createUser()`/`signInWithPassword` en cuanto
+  se pruebe contra Supabase real. Sigue siendo solo numérico, mismo pad, un dígito más → con
+  el `juezId` ya elegido, arma `email = {juezId}@charroapp.internal` y llama
+  `signInWithPassword` con el PIN como password real
 - Archivos: `SelectJuez.tsx`, `LoginJuez.tsx`, `e2e/login-offline.spec.ts`
 - **DoD**: el juez del seed puede loguearse; y el test que realmente importa — forzar un
   access token vencido y desconectar la red, y confirmar que escribir en Dexie sigue
@@ -791,9 +839,16 @@ en la parte de Capacitor no debería bloquear ni confundirse con el estado de De
 - **DoD**: la app corre visualmente correcta en al menos un simulador nativo; activar/desactivar modo avión en el simulador/dispositivo hace que `@capacitor/network` reporte el cambio correctamente.
 
 **0.6 — CI básico + hosting web**
-- GitHub Actions (u equivalente): workflow que corre en cada push/PR: `npm install`, `npm run lint`, `npm run test`, `npm run build`. **El step `actions/setup-node` debe leer la
+- GitHub Actions (u equivalente): workflow que corre en cada push/PR: `npm install`, `npm run lint`, `npm run test`, `npm run build`, `npx playwright install --with-deps`, `npx playwright test`. **El step `actions/setup-node` debe leer la
   misma versión fijada en `.nvmrc` (0.1)** (`node-version-file: '.nvmrc'`) en vez de un
   número hardcodeado aparte — evita que CI y desarrollo local diverjan silenciosamente.
+- **Playwright en CI necesita un Supabase real que hablar** — el test de sesión offline
+  (0.4.3) se conecta a un proyecto Supabase de verdad, ya migrado y sembrado. La filosofía de
+  "cada developer crea su propio proyecto" (0.3.1) no aplica a un job de CI: se crea **un
+  proyecto Supabase dedicado a CI** (excepción explícita, CI no es un developer), con
+  migraciones+seed ya aplicados, y sus credenciales (`SUPABASE_URL`, `SUPABASE_ANON_KEY`)
+  guardadas como secrets de GitHub Actions — sin esto, el step de Playwright falla por no
+  tener con qué autenticar al juez de prueba, no por un bug real.
 - **Decisión de hosting web** ("Web browser" es una de las 3 plataformas del alcance del
   proyecto — admin y `/display` deben ser accesibles sin pasar por Capacitor): desplegar el
   build web (`npm run build` → `dist/`) en un host estático con preview deploys por PR
@@ -840,7 +895,11 @@ confiar solo en `navigator.onLine` sin `@capacitor/network` puede dar falsos pos
 conectividad en nativo; sin el índice único de torneo activo, dos torneos activos
 simultáneos rompen `/display` y el login de jueces de forma silenciosa; configurar
 `vite-plugin-pwa` sin acotar el precache al app-shell puede terminar cacheando respuestas de
-Supabase y reintroducir el mismo bug de "datos viejos" que Dexie ya resuelve.
+Supabase y reintroducir el mismo bug de "datos viejos" que Dexie ya resuelve; crear usuarios
+vía Admin API sin `email_confirm: true` bloquea todo login con "Email not confirmed" pese a
+que RLS/schema estén perfectos; usar un PIN de menos de 6 caracteres choca con el mínimo de
+password que exige Supabase Auth por default — ambos son fallas que solo aparecen al probar
+contra Supabase real, no en ninguna revisión de código.
 
 ---
 
@@ -851,13 +910,25 @@ Admin/Display) con el menor riesgo, calificando una sola suerte.
 
 **1.1 — Gestión mínima de torneos**
 - `TorneoForm.tsx` (nombre, fecha, lugar); alta de charros con participación en `cala_de_caballo`
-- Edge Function `create-juez`: crea `auth.users` (admin API, PIN como password) + fila en
+- Edge Function `create-juez`: crea `auth.users` (admin API, PIN como password, **`email_confirm: true`
+  obligatorio** — mismo motivo que `scripts/seed-auth.ts` en 0.3.4, el email sintético nunca se confirma solo) + fila en
   `jueces` en una sola operación — implementa la decisión de auth de Fase 0
 - **Reseteo de PIN**: hasta ahora ninguna fase del plan cubre qué pasa cuando un juez olvida
   su PIN en cancha (escenario probable en un evento real) — se resuelve aquí con el mismo
   patrón que `create-juez`: Edge Function `reset-pin` (solo admin, actualiza el password de
   `auth.users` del juez) en vez de dejarlo como reseteo manual ad-hoc vía dashboard de
   Supabase
+- **Desactivar juez** (candidato de esta sub-fase, junto a `reset-pin` — mismo tipo de
+  operación administrativa): UI mínima para que el admin alterne `jueces.activo`. La columna
+  y las policies ya existen desde Fase 0 (0.3.2/0.3.3); aquí solo falta el botón. Si no
+  alcanza el tiempo de esta sub-fase, se puede resolver manualmente vía SQL Editor de
+  Supabase hasta que se construya — no bloquea nada más de Fase 1. **Importante al
+  implementarlo**: solo voltear `activo = false` no impide el login — Supabase Auth no
+  conoce esa columna, así que `signInWithPassword` seguiría funcionando y el juez recién
+  ahí chocaría con RLS al leer/escribir (UX confusa: "entré pero no puedo hacer nada"). La
+  implementación real debe además deshabilitar la cuenta en `auth.users` vía Admin API
+  (mismo patrón que `create-juez`/`reset-pin`, no un simple `UPDATE`), para que el rechazo
+  ocurra limpio en el login, no después.
 - `useTorneo(id)`: torneo + participaciones, cacheadas en Dexie
 - Archivos: `TorneoForm.tsx`, `ParticipacionForm.tsx` (nuevo), `useTorneo.ts`, `supabase/functions/create-juez/index.ts`, `supabase/functions/reset-pin/index.ts`
 - **DoD**: admin crea un torneo con 3+ charros con participación en `cala_de_caballo`; admin resetea el PIN de un juez existente y el juez puede loguearse con el PIN nuevo
@@ -923,7 +994,7 @@ confirmar que `cala_de_caballo` sigue funcionando sin cambios de comportamiento.
 Cada ítem es un sub-proyecto independiente con su propia migración SQL separada (no
 mezclar en un solo archivo, para poder habilitar/deshabilitar cada uno sin afectar a otros):
 
-- 3.1 Export PDF/Excel (client-side; `papaparse` ya cubre CSV, agregar librería de PDF si aplica)
+- 3.1 Export CSV/PDF/Excel del dashboard admin (client-side; CSV vía `papaparse`, agregar librería de PDF si aplica) — ninguna fase anterior construye export, se hace todo aquí
 - 3.2 Bulk CSV import de charros
 - 3.3 Audit log (tabla `auditoria` nueva, registro en cada UPDATE de calificación por admin)
 - 3.4 Históricos/estadísticas por charro entre torneos
