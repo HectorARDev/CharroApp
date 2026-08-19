@@ -5,6 +5,8 @@
 > migraciones SQL literales, criterios de aceptación) vive en `plan_llm.md`, pensado para
 > que un agente/LLM lo siga sin ambigüedad. Cuando algo cambie, se actualiza primero
 > `plan_llm.md` y este documento se resincroniza después — evitar editarlos por separado.
+> Para cliente/patrocinador (alcance por hitos, cronograma y costos, sin jerga técnica) ver
+> `plan_cliente.md`.
 
 ## Contexto
 
@@ -106,6 +108,7 @@ Supabase (servidor)
 - Login de juez en 2 pasos: selección de nombre (lista del torneo activo) → PIN pad. Evita depender de un identificador críptico y resuelve el problema de que un PIN por sí solo no identifica a la persona.
 - Login email/contraseña para admin.
 - Roles: `admin`, `juez`. La alta de jueces siempre pasa por una función de servidor (Edge Function con permisos elevados) que crea la cuenta y la fila del juez en una sola operación — nunca se inserta un juez directo en la tabla pública.
+- Reseteo de PIN (Fase 1): un juez olvidando su PIN en cancha es un escenario probable en un evento real; se resuelve con una Edge Function `reset-pin` (mismo patrón que la de alta), en vez de dejarlo como reseteo manual ad-hoc.
 
 ### 2. Gestión de Torneos
 - Crear torneo, agregar equipos/charros.
@@ -188,7 +191,7 @@ Tablas principales:
 - `calificaciones` — puntuación, `juez_id`, `participacion_id`, `updated_at`/`synced_at` (control de sync), `detalle` (sub-puntajes para suertes de equipo).
 - `jueces` — perfil + rol + torneo asignado. Sin columna de PIN propia: el PIN es directamente el password de la cuenta de autenticación asociada.
 
-RLS: cada juez solo lee/escribe sus propias calificaciones; el admin tiene acceso completo; existe una política de **lectura pública sin autenticación** (torneos, participaciones, calificaciones y jueces del torneo activo) que es lo que hace posible tanto `/display` como la pantalla de selección de juez antes de loguearse.
+RLS: cada juez solo lee/escribe sus propias calificaciones; el admin tiene acceso completo (verificado con una función `security definer` — comprobar el rol admin con una subconsulta directa sobre `jueces` deja al propio admin bloqueado de su tabla, porque esa subconsulta también queda sujeta a RLS); existe una política de **lectura pública** (torneos, participaciones, calificaciones y jueces del torneo activo) que es lo que hace posible tanto `/display` como la pantalla de selección de juez antes de loguearse — esa política aplica tanto a usuarios anónimos como a jueces ya autenticados (son roles de Postgres distintos; limitarla solo a anónimos deja a un juez logueado sin poder leer el torneo que necesita calificar). RLS debe habilitarse explícitamente tabla por tabla antes de que cualquier política tenga efecto — es el paso que más fácil se olvida porque, si falta, no da error: simplemente deja todo abierto.
 
 ---
 
@@ -211,11 +214,13 @@ RLS: cada juez solo lee/escribe sus propias calificaciones; el admin tiene acces
 
 Fase 0 se dividió en 6 sub-fases, cada una con su propio criterio de aceptación:
 
-1. **Scaffolding** — proyecto, lint/format, tema visual base, estructura de carpetas, testing.
-2. **Routing + layout** — rutas de las 4 áreas, protección de rutas (esqueleto), code-splitting.
-3. **Supabase** — proyecto, schema, políticas de seguridad (con su propio checkpoint de verificación antes de continuar), datos de prueba reproducibles.
-4. **Auth** — el hook de autenticación y su contrato de sesión offline, login admin, login juez (el checkpoint más crítico de toda la fase), integración de rutas protegidas.
-5. **Dexie + Capacitor nativo** — almacén local y primera corrida en simulador.
-6. **CI básico** — que realmente bloquee, no solo que exista.
+1. **Scaffolding** — proyecto, lint/format, tema visual base, estructura de carpetas, testing, `vite-plugin-pwa` configurado para precachear solo el app-shell (nunca llamadas a Supabase).
+2. **Routing + layout** — rutas de las 4 áreas, protección de rutas (esqueleto), code-splitting. `/login` resuelve selección de juez + PIN como un solo flujo (el PIN es un estado interno, no una ruta aparte); `/login/admin` es la ruta separada para el login de administrador. La protección de rutas cubre tanto `/admin/*` como `/calificar/:participacionId` — solo `/display` es intencionalmente pública.
+3. **Supabase** — proyecto (en la región disponible más cercana a México, por latencia de Realtime en un evento en vivo), schema, políticas de seguridad (con su propio checkpoint de verificación antes de continuar — ver la nota de RLS más abajo), datos de prueba reproducibles. El seed de prueba se arma en dos piezas: los datos de negocio (torneo/equipos/charros) vía SQL, y el admin+juez de prueba vía un script que usa la Admin API de Supabase — igual que `auth.users` no se puede poblar de forma confiable con un `INSERT` directo, se necesita el mismo mecanismo que después usa la función de alta de jueces en Fase 1.
+4. **Auth** — el hook de autenticación y su contrato de sesión offline (login/registro retornan `{ error }`, no lanzan excepción — un PIN equivocado es un resultado esperado, no algo excepcional), login admin, login juez (el checkpoint más crítico de toda la fase), integración de rutas protegidas.
+5. **Dexie + Capacitor nativo** — almacén local y primera corrida en simulador. Se fija explícitamente una versión mínima de OS/SDK (Android/iOS) acorde al hardware real que suele usarse en un lienzo charro — no es un dominio con dispositivos de último modelo.
+6. **CI básico + hosting web** — CI que realmente bloquee, no solo que exista, usando la misma versión de Node que el resto del equipo (fijada en `.nvmrc`); además la decisión de dónde se despliega el build web (`dist/`) para que admin y `/display` sean accesibles desde una URL real, no solo `localhost`, con sus propias variables de entorno configuradas en el host (apuntando al proyecto Supabase de cada developer).
+
+**Onboarding**: cada developer crea su **propio** proyecto Supabase (gratis) — no se comparte un proyecto de equipo entre todos. El flujo real de arranque es clonar el repo, crear el proyecto, aplicar migraciones y correr el seed, no solo `npm install && npm run dev`.
 
 Se validó con 8 casos de uso de infraestructura (no de negocio todavía) — el más importante es "un juez reabre la app sin red, horas después de su último login, con el token ya vencido, y puede seguir calificando sin error": ese es el caso de uso que demuestra que la arquitectura cumple su promesa central antes de construir nada más encima.
