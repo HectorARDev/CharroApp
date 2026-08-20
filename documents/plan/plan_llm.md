@@ -453,15 +453,19 @@ lógica de calificación todavía.
 
 **Dependencias reales** (la numeración 0.1→0.6 es agrupación temática, no obliga secuencia
 estricta salvo donde se indica): 0.1 es el único prerrequisito universal. A partir de ahí,
-**0.2, 0.3.1, 0.5.1 y 0.5.2 no dependen entre sí** y pueden hacerse en cualquier orden o en
+**0.2, 0.3.1 y 0.5.2 no dependen entre sí** y pueden hacerse en cualquier orden o en
 paralelo. **0.6 (CI) solo depende de 0.1** — conviene activarlo apenas terminen los scripts
 de lint/test/build, no esperar hasta el final, para que proteja el resto de Fase 0 mientras
 se construye. Las únicas cadenas estrictas son: `0.3.1 → 0.3.2 → 0.3.3 → 0.3.4` (cada una
-depende del schema/RLS anterior) y, dentro de 0.4: **0.4.1 solo depende de 0.2** (es un
-stub sin red); **0.4.2 y 0.4.3 dependen de 0.3.4** (necesitan el admin/juez del seed para
-poder loguearse de verdad, no solo de 0.3.3 — 0.3.3 deja las policies listas pero sin datos
-no hay con qué probar el login); **0.4.4 depende de 0.4.1 + 0.2** (conecta el hook real a
-`ProtectedRoute`).
+depende del schema/RLS anterior) y, dentro de 0.4: **0.4.1 depende de 0.2 y de 0.5.1** (el
+hook en sí es un stub sin red, pero su chequeo de "dispositivo compartido" ya consulta
+`Dexie.calificaciones`, así que necesita el schema de 0.5.1 aplicado, no solo la ruta de
+0.2); **0.4.2 depende de 0.3.4**, y **0.4.3 depende de 0.3.4 y de 0.5.1** (además del
+admin/juez del seed, `SelectJuez.tsx` hace `bulkPut` en `Dexie.jueces` — no solo de 0.3.3,
+que deja las policies listas pero sin datos no hay con qué probar el login, ni cachear
+nada sin el schema de Dexie); **0.4.4 depende de 0.4.1 + 0.2** (conecta el hook real a
+`ProtectedRoute`). Por esto, en la práctica conviene resolver 0.5.1 antes de empezar 0.4,
+aunque no forme parte de su cadena "0.3.x".
 
 **0.1 — Scaffolding (sin backend)**
 - `npm create vite@latest . -- --template react-ts --force` — el directorio ya tiene
@@ -799,8 +803,14 @@ DoD con "crear el proyecto".
   mecanismo de desactivación (0.3.2) realmente bloquea, no solo existe la columna, (f)
   autenticado como un juez, un `insert` de prueba en `calificaciones` con un `participacion_id`
   que pertenece a un torneo **distinto** al `torneo_id` del juez falla — confirma que el join
-  agregado en el punto 3 realmente ata la escritura al torneo propio, no solo al `juez_id`.
-- **DoD**: las 6 pruebas de acceso documentadas y pasando — este DoD debe cumplirse ANTES de empezar 0.4, no en paralelo.
+  agregado en el punto 3 realmente ata la escritura al torneo propio, no solo al `juez_id`, (g)
+  autenticado como un juez, un `select` en `torneos` y en `participaciones` del torneo activo
+  devuelve filas (no solo como `anon`) — confirma que la policy pública del punto 2 realmente
+  aplica también a `authenticated`, no solo a `anon`, (h) autenticado como el admin del seed,
+  un `insert`/`update` de prueba en `equipos`, `charros`, `participaciones` y `jueces` (no solo
+  `torneos`, ya cubierto en (d)) funciona — confirma que `is_admin()` cubre las 6 tablas y no
+  solo la primera que se prueba.
+- **DoD**: las 8 pruebas de acceso documentadas y pasando — este DoD debe cumplirse ANTES de empezar 0.4, no en paralelo.
 
 **0.3.4 — Tooling + seed**
 - `npx supabase gen types typescript --project-id <ref> --schema public > src/lib/database.types.ts`
@@ -849,6 +859,10 @@ necesita su propia verificación explícita.
   `signOut()` limpia tanto la sesión de Supabase como los valores planos de `@capacitor/preferences`
   (`juez_id`/`role`) — dejar cualquiera de los dos no invalida la sesión visible, pero sí
   puede confundir un siguiente login en el mismo dispositivo compartido entre jueces.
+- **Instalar `@capacitor/preferences` aquí** (`npm install @capacitor/preferences`) — es el
+  primer punto del plan que lo usa. Funciona también en web vía su fallback a `localStorage`
+  sin necesitar que exista un proyecto nativo, así que no depende de que 0.5.2 (`npx cap
+  init`) ya esté hecho.
 - **Dispositivo compartido entre jueces — registros pendientes de sincronizar**:
   `signInJuez(juezId, pin)` debe verificar, antes de completar el login, si existen registros
   en `Dexie.calificaciones` con `synced: 0` y un `juez_id` **distinto** al que está por iniciar
@@ -921,7 +935,10 @@ necesita su propia verificación explícita.
 - Archivos: `src/features/auth/ProtectedRoute.tsx`
 - **DoD**: acceder a `/admin/*` sin sesión redirige a `/login`; un juez autenticado no puede
   entrar a `/admin/*`; acceder a `/calificar/:participacionId` sin sesión también redirige a
-  `/login` (no solo `/admin/*`); `/display/:torneoId` sigue siendo accesible sin sesión.
+  `/login` (no solo `/admin/*`); `/display/:torneoId` sigue siendo accesible sin sesión; tras
+  un login exitoso (admin o juez), refrescar la página (web) o cerrar y reabrir la app
+  (nativo) mantiene la sesión sin pedir credenciales de nuevo — verifica en la práctica que
+  `@capacitor/preferences` (0.4.1) persiste correctamente, no solo que el hook compila.
 
 **0.5 — Dexie + Capacitor nativo**
 
@@ -955,6 +972,11 @@ en la parte de Capacitor no debería bloquear ni confundirse con el estado de De
 - GitHub Actions (u equivalente): workflow que corre en cada push/PR: `npm install`, `npm run lint`, `npm run test`, `npm run build`, `npx playwright install --with-deps`, `npx playwright test`. **El step `actions/setup-node` debe leer la
   misma versión fijada en `.nvmrc` (0.1)** (`node-version-file: '.nvmrc'`) en vez de un
   número hardcodeado aparte — evita que CI y desarrollo local diverjan silenciosamente.
+- **Step de verificación post-build**: justo después de `npm run build`, un step que corre
+  `grep -r "SUPABASE_SERVICE_ROLE_KEY" dist/` y hace fallar el job si encuentra alguna
+  coincidencia (`grep` devuelve 0 = encontrado = falla el step) — es la única forma de que el
+  ítem correspondiente de `## VERIFICATION CHECKLIST` se verifique en cada push en vez de
+  quedar como chequeo manual que alguien puede olvidar.
 - **Playwright en CI necesita un Supabase real que hablar** — el test de sesión offline
   (0.4.3) se conecta a un proyecto Supabase de verdad, ya migrado y sembrado. La filosofía de
   "cada developer crea su propio proyecto" (0.3.1) no aplica a un job de CI: se crea **un
@@ -999,7 +1021,10 @@ corrió sin error". Cada uno referencia qué sub-fase(s) verifica.
 - **UC-0.2 Primer login de admin (con red)**: el admin de prueba entra con email+password y llega a `/admin`. → 0.4.2, 0.4.4
 - **UC-0.3 Primer login de juez (con red)**: el juez ve la lista de jueces del torneo activo, elige su nombre, teclea su PIN, entra a la app. → 0.3.3, 0.4.3
 - **UC-0.4 Juez reabre la app sin red, horas después**: con sesión cacheada de un login previo y el access token ya vencido, el juez abre la app en modo avión y la app no lo bloquea. → 0.4.1, 0.4.3 — **este es el caso de uso que valida la promesa central de "offline-first" de todo el proyecto**, no solo de Fase 0.
-- **UC-0.5 Público visita `/display` sin cuenta**: un anónimo abre `/display/:torneoId` del torneo activo y ve datos, sin poder loguearse ni escribir nada. → 0.3.3
+- **UC-0.5 Público visita `/display` sin cuenta**: un anónimo, autenticado como `anon` vía la
+  API/SQL directa (no navegando la ruta — `/display/:torneoId` sigue siendo un placeholder de
+  texto hasta que `TablPublico.tsx` se construya en 1.4), puede leer torneo/participaciones/
+  equipos/charros del torneo activo pero no puede escribir nada. → 0.3.3
 - **UC-0.6 Acceso cruzado entre jueces (debe fallar)**: un juez autenticado intenta leer/escribir calificaciones de otro juez vía llamada directa a la API — RLS lo rechaza. → 0.3.3
 - **UC-0.7 Primera corrida en simulador nativo**: la app compilada corre en un simulador Android o iOS y llega hasta la pantalla de login. → 0.5.2
 - **UC-0.8 Regresión de CI**: un desarrollador introduce un error de lint a propósito y el push queda bloqueado por CI antes de llegar a `main`. → 0.6
@@ -1033,6 +1058,9 @@ separada con RLS propia si se necesita garantía real a nivel de base de datos.
 Admin/Display) con el menor riesgo, calificando una sola suerte.
 
 **1.1 — Gestión mínima de torneos**
+- `TorneoList.tsx`: lista de torneos existentes (admin) — es desde aquí donde el admin
+  dispara la acción "activar torneo" descrita abajo; sin esta pantalla no hay forma de ver
+  qué torneos existen ni cuál está activo.
 - `TorneoForm.tsx` (nombre, fecha, lugar); alta de charros con participación en `cala_de_caballo`
 - **Activar torneo**: acción de admin que desactiva el torneo `activo` actual (si existe,
   pasa a `estado='finalizado'` o el que corresponda) y activa el nuevo, en una sola
@@ -1059,13 +1087,18 @@ Admin/Display) con el menor riesgo, calificando una sola suerte.
   (mismo patrón que `create-juez`/`reset-pin`, no un simple `UPDATE`), para que el rechazo
   ocurra limpio en el login, no después.
 - `useTorneo(id)`: torneo + participaciones, cacheadas en Dexie
-- Archivos: `TorneoForm.tsx`, `ParticipacionForm.tsx` (nuevo), `useTorneo.ts`, `supabase/functions/create-juez/index.ts`, `supabase/functions/reset-pin/index.ts`
+- Archivos: `TorneoList.tsx` (nuevo), `TorneoForm.tsx`, `ParticipacionForm.tsx` (nuevo), `useTorneo.ts`, `supabase/functions/create-juez/index.ts`, `supabase/functions/reset-pin/index.ts`
 - **DoD**: admin crea un torneo con 3+ charros con participación en `cala_de_caballo`; admin resetea el PIN de un juez existente y el juez puede loguearse con el PIN nuevo
 
 **1.2 — Calificación (offline write)**
+- `CalificacionForm.tsx`: wrapper compartido que monta `SuerteRouter.tsx` — muestra el
+  nombre del charro/equipo actual y su posición en el orden de turno (`participacion.orden`),
+  y es el único punto donde se resuelve "quién es el siguiente pendiente" tras cada envío; las
+  suertes individuales (`CalaDeCaballo.tsx`, etc.) no duplican esta lógica de cabecera/progreso.
 - `CalaDeCaballo.tsx`: stepper 0-10 paso 0.5, "Guardar y siguiente"
 - `SuerteRouter.tsx`: switch completo de las 9 suertes (placeholder "Próximamente" en las otras 8, para no re-arquitecturar en Fase 2)
 - Al enviar: uuid local, escribir en Dexie (`synced: 0`, `updated_at: Date.now()`), navegar al siguiente pendiente por `orden`
+- Archivos: `CalificacionForm.tsx` (nuevo), `CalaDeCaballo.tsx`, `SuerteRouter.tsx`
 - **DoD**: con red desactivada, calificar dos charros deja 2 registros en Dexie con `synced: 0`
 
 **1.3 — Sync engine**
